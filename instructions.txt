@@ -1,0 +1,163 @@
+================================================================
+ Aperture-Diffraction-Phase  指令集（Windows PowerShell）
+ 正向 = 可学习屏幕 + 精确传播；设计 = 纯物理回传
+================================================================
+
+0. 环境
+----------------------------------------------------------------
+cd D:\Physics_Project\Aperture-Diffraction-Phase
+pip install numpy matplotlib pillow torch
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+
+
+================================================================
+ 1. 生成数据（generate_v2.py）
+================================================================
+# 1.1 主用例：NF=1、整份数据共用一块屏、混入 20% 密集条纹掩模
+python generate_v2.py --samples 1000 --nf 1 --glass-shared --glass-preset weak --hologram-fraction 0.2 --out data/v2_nf1
+
+# 1.2 更厚的屏：颗粒度不变，只加相位起伏（rms 0.6 -> 1.5 rad）
+python generate_v2.py --samples 1000 --nf 1 --glass-shared --glass-correlation-um 794 --glass-rms-rad 1.5 --hologram-fraction 0.2 --out data/v2_nf1_thick
+
+# 1.3 完全随机相位片（相关长度 1 µm ≈ 0.1 px，逐像素独立）
+python generate_v2.py --samples 1000 --nf 1 --glass-shared --glass-correlation-um 1 --glass-rms-rad 2.0 --hologram-fraction 0.2 --out data/v2_nf1_random
+
+# 1.4 逐样本换屏（每张图一块新的）
+python generate_v2.py --samples 1000 --nf 1 --hologram-fraction 0.2 --out data/v2_per
+
+# 1.5 七组 NF 全生成（默认；训练时用 --groups 挑）
+python generate_v2.py --samples 1000 --glass-shared --hologram-fraction 0.2 --out data/v2_all
+
+# 1.6 顺带保存无屏的理想图样（体积翻倍）
+python generate_v2.py --samples 1000 --nf 1 --glass-shared --save-clean --out data/v2_clean
+
+
+================================================================
+ 2. 训练（train.py）
+================================================================
+# 2.1 纯相位屏（最快，3 分钟）
+python train.py --data data/v2_nf1_thick --groups 1 --models phase --epochs 60 --out runs/v2_nf1_thick
+
+# 2.2 复振幅屏 + 背景（真实装置推荐）
+python train.py --data data/v2_nf1_thick --groups 1 --models phase --screen-mode complex --background map --amp-grid 16 --epochs 60 --out runs/v2_nf1_full
+
+# 2.3 只加背景（性价比最高的一项）
+python train.py --data data/v2_nf1_thick --groups 1 --models phase --background map --epochs 60 --out runs/v2_nf1_bg
+
+# 2.4 叠一个残差 U-Net（吸收离散化误差）
+python train.py --data data/v2_nf1_thick --groups 1 --models phase_residual --epochs 60 --out runs/v2_nf1_res
+
+# 2.5 对照：不带屏幕的纯物理层（等价 φ=0）
+python train.py --data data/v2_nf1_thick --groups 1 --models physics --epochs 60 --out runs/v2_nf1_ref
+
+# 2.6 相位反演卡住时换初始化重训
+python train.py --data data/v2_nf1_thick --groups 1 --models phase --phase-init random --epochs 100 --out runs/v2_nf1_r
+
+# 2.7 看结果
+Get-Content runs/v2_nf1_thick/nf_1/phase/selection.json
+python -c "import numpy as np; p=np.load('runs/v2_nf1_thick/nf_1/phase/learned_phase.npy'); print(p.shape, 'rms=%.3f rad' % p.std())"
+
+
+================================================================
+ 3. 反设计（design.py）
+================================================================
+# 3.1 字符
+python design.py --checkpoint runs/v2_nf1_thick/nf_1/phase/best_model.pt --char Z --modulation gray --out design_runs/Z
+
+# 3.2 自己的图片（放 inputs/ 下）
+python design.py --checkpoint runs/v2_nf1_thick/nf_1/phase/best_model.pt --target inputs/ZJU.jpg --modulation gray --out design_runs/ZJU
+
+# 3.3 二值掩模（可加工）
+python design.py --checkpoint runs/v2_nf1_thick/nf_1/phase/best_model.pt --char Z --modulation binary --out design_runs/Z_binary
+
+# 3.4 纯相位掩模（需要 SLM）
+python design.py --checkpoint runs/v2_nf1_thick/nf_1/phase/best_model.pt --char Z --modulation phase --out design_runs/Z_phase
+
+# 3.5 仿真验收：用真值相位再算一遍（真实实验没有这个文件）
+python design.py --checkpoint runs/v2_nf1_thick/nf_1/phase/best_model.pt --char Z --modulation gray --true-phase data/v2_nf1_thick/glass_phase.npy --out design_runs/Z_check
+
+# 3.6 多 restart + 更长迭代
+python design.py --checkpoint runs/v2_nf1_thick/nf_1/phase/best_model.pt --char Z --modulation gray --steps 2500 --restarts 3 --out design_runs/Z_long
+
+
+================================================================
+ 4. 冒烟（64 网格 / 24 光阑，约 3 分钟，指标无意义）
+================================================================
+python generate_v2.py --grid 64 --samples 24 --nf 1 --glass-shared --skip-validation --out data/_smoke
+python train.py --data data/_smoke --groups 1 --models phase --epochs 8 --batch-size 8 --base-ch 8 --out runs/_smoke
+python design.py --checkpoint runs/_smoke/nf_1/phase/best_model.pt --char Z --steps 300 --restarts 1 --true-phase data/_smoke/glass_phase.npy --out design_runs/_smoke
+
+
+================================================================
+ 5. 常用参数
+================================================================
+【generate_v2.py】
+  --samples 1000            光阑数
+  --nf 1                    只生成指定 NF 组（可给多个）
+  --grid 256 --pitch-um 10 --wavelength-nm 532
+  --glass-shared            整份数据共用一块屏（主用例）
+  --glass-correlation-um F  相关长度；越小越"磨砂"
+  --glass-rms-rad F         相位起伏 rms（rad）
+  --glass-preset NAME       weak / moderate / strong / groundglass（预设）
+  --hologram-fraction F     把比例 F 的样本换成密集条纹掩模
+  --hologram-mode M         binary / gray / both
+  --save-clean              额外保存无屏图样
+  --skip-validation         跳过数值验收（仅冒烟用）
+
+【train.py】
+  --data DIR --out DIR      输出目录必须不存在
+  --groups 1                只训练指定 NF 组
+  --models phase | phase_residual | physics
+  --screen-mode phase | complex       复振幅屏多学一个振幅 a(x)
+  --background none | map             再学一张非负背景 B(x)
+  --amp-grid 16             振幅参数化粒度（0 = 全分辨率）
+  --propagator asm | hybrid           屏幕必须走 ASM
+  --phase-lr 0.02           屏幕参数的学习率
+  --phase-init zero | random
+  --epochs 60 --batch-size 16 --lambda-freq 0.02 --lr 3e-4
+  --seed 42 --device auto|cpu|cuda
+
+【design.py】
+  --checkpoint PATH         必须是 phase / phase_residual 的 best_model.pt
+  --char Z | --target FILE
+  --modulation binary|gray|phase
+  --steps 1500 --restarts 2 --lr 0.05
+  --true-phase PATH         只用于验收，不参与优化
+  --design-background signal|total    signal = 只用信号（默认，推荐）
+  --out DIR
+
+
+================================================================
+ 6. 产物
+================================================================
+data/<name>/
+    apertures.npy  glass_phase.npy  splits.npz  manifest.json  validation.json
+    nf_1/patterns.npy        含屏真值（峰值归一化 + log 压缩）
+    nf_1/preview.png
+
+runs/<name>/nf_1/<model>/
+    best_model.pt            state_dict 里带 screen.phase / screen.amplitude / background.logit
+    learned_phase.npy        φ̂ (grid, grid)，弧度
+    learned_amplitude.npy    a(x)，仅 --screen-mode complex
+    learned_background.npy   B(x)，仅 --background map
+    history.csv  selection.json  test_metrics.json
+    loss_curve.png  train_result.png
+
+design_runs/<name>/
+    aperture.npy / aperture.png
+    pattern_pred.npy  pattern_fit.png  pattern_roi.png  target_roi.png
+    comparison.png           ① 目标 ② φ̂ 正向 ③ 真实相位 ④ 两者差
+                             ⑤ 光阑 ⑥ 全视场(φ̂) ⑦ 全视场(真实) ⑧ 收敛
+    result.json
+    pattern_true_intensity.npy / pattern_true_roi.png （仅 --true-phase）
+
+
+================================================================
+ 7. 判据
+================================================================
+训练学对没有：selection.json 的 test.mae
+    1e-5 量级  -> 抓到了
+    1e-3 量级  -> 有非相位偏差，或相位反演陷局部极小
+    1e-2 以上  -> 模型形式不成立，先别做设计
+残差图（train_result.png 最后一列）：白 = 只是相位没抓全；有结构 = 有东西没被建模
+设计可信度：comparison.png 的 ②（φ̂ 正向）；有真值相位时看 ③
