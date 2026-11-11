@@ -1,0 +1,22 @@
+# Python 缓存 / 虚拟环境 / 编辑器
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.vscode/
+
+# 运行产物：只提交目录占位，不提交数据本身
+/data/*
+!/data/.gitkeep
+/runs/*
+!/runs/.gitkeep
+/design_runs/*
+/inputs/*
+!/inputs/.gitkeep
+
+# 权重与数据数组（即使不在上述目录也不提交）
+*.pt
+*.pth
+*.ckpt
+*.npy
+*.npz
